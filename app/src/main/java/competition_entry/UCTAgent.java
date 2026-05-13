@@ -73,6 +73,17 @@ public class UCTAgent extends PlanetWarsPlayer {
     public double timeDiscountGamma = 0.99;
     public double timeDiscountScale = 10.0;     // discount = gamma ^ (elapsed / scale)
 
+    // ---- PUCT enhancement (off by default = vanilla UCT) ----
+    /** When true, switches arm selection from UCB1 to PUCT (AlphaGo Zero style):
+     *  U(a) = Q(a) + priorWeight * P(a) * sqrt(N) / (1 + n_a)
+     *  where P(a) is a heuristic prior derived from the same domain logic as
+     *  GreedyHeuristicAgent (distance + defense estimate + growth bonus). */
+    public boolean useHeuristicPrior = false;
+    /** Softmax temperature on the raw heuristic scores. Lower = sharper prior. */
+    public double priorTemperature = 2.0;
+    /** PUCT exploration constant — the c in c * P(a) * sqrt(N) / (1 + n_a). */
+    public double priorWeight = 2.0;
+
     // ---- Models ----
     private final PlanetWarsAgent opponentRolloutPolicy = new GreedyHeuristicAgent();
     private final PlanetWarsAgent myRolloutPolicy = new GreedyHeuristicAgent();
@@ -186,7 +197,7 @@ public class UCTAgent extends PlanetWarsPlayer {
 
     @Override
     public String getAgentType() {
-        return "UCT-decoupled-v1";
+        return useHeuristicPrior ? "UCT-puct-v2" : "UCT-decoupled-v1";
     }
 
     // =====================================================================
@@ -216,6 +227,10 @@ public class UCTAgent extends PlanetWarsPlayer {
         int[] oppVisits;
         long oppTotalVisits;
 
+        // Heuristic prior P(a) per arm — null when useHeuristicPrior is false (pure UCB1).
+        double[] myPrior;
+        double[] oppPrior;
+
         final HashMap<Integer, Node> children = new HashMap<>();
         int visits;
         double totalReward;
@@ -233,14 +248,19 @@ public class UCTAgent extends PlanetWarsPlayer {
             myVisits = new int[myArmEncoding.length];
             oppTotal = new double[oppArmEncoding.length];
             oppVisits = new int[oppArmEncoding.length];
+
+            if (useHeuristicPrior) {
+                myPrior = computePrior(s, mySources, myTargets, myArmEncoding);
+                oppPrior = computePrior(s, oppSources, oppTargets, oppArmEncoding);
+            }
         }
 
         int selectMyUcb() {
-            return ucbSelect(myArmEncoding.length, myVisits, myTotal, myTotalVisits);
+            return select(myArmEncoding.length, myVisits, myTotal, myTotalVisits, myPrior);
         }
 
         int selectOppUcb() {
-            return ucbSelect(oppArmEncoding.length, oppVisits, oppTotal, oppTotalVisits);
+            return select(oppArmEncoding.length, oppVisits, oppTotal, oppTotalVisits, oppPrior);
         }
 
         void updateMy(int armIdx, double reward) {
@@ -286,18 +306,87 @@ public class UCTAgent extends PlanetWarsPlayer {
         }
     }
 
-    /** Standard UCB1 over a fixed-size MAB. Force-explores any unvisited arm first. */
-    private int ucbSelect(int n, int[] visits, double[] total, long totalVisits) {
-        for (int i = 0; i < n; i++) if (visits[i] == 0) return i;
+    /**
+     * Arm selection. Two modes depending on whether a prior is supplied:
+     *   prior == null  -> vanilla UCB1 (Q(a) + c * sqrt(ln N / n_a)), force-explores unvisited.
+     *   prior != null  -> PUCT (Q(a) + priorWeight * P(a) * sqrt(N) / (1 + n_a)). Unvisited arms
+     *                     use first-play-urgency = 0; their bonus = priorWeight * P(a) * sqrt(N),
+     *                     so high-prior arms are tried earlier without the UCB1 "must visit each
+     *                     arm at least once" rule.
+     */
+    private int select(int n, int[] visits, double[] total, long totalVisits, double[] prior) {
+        if (prior == null) {
+            for (int i = 0; i < n; i++) if (visits[i] == 0) return i;
+            int best = 0;
+            double bestVal = Double.NEGATIVE_INFINITY;
+            double logT = Math.log(totalVisits);
+            for (int i = 0; i < n; i++) {
+                double mean = total[i] / visits[i];
+                double ucb = mean + ucbC * Math.sqrt(logT / visits[i]);
+                if (ucb > bestVal) { bestVal = ucb; best = i; }
+            }
+            return best;
+        }
+        // PUCT
         int best = 0;
         double bestVal = Double.NEGATIVE_INFINITY;
-        double logT = Math.log(totalVisits);
+        double sqrtN = Math.sqrt(Math.max(1L, totalVisits));
         for (int i = 0; i < n; i++) {
-            double mean = total[i] / visits[i];
-            double ucb = mean + ucbC * Math.sqrt(logT / visits[i]);
-            if (ucb > bestVal) { bestVal = ucb; best = i; }
+            double q = (visits[i] > 0) ? (total[i] / visits[i]) : 0.0;
+            double bonus = priorWeight * prior[i] * sqrtN / (1.0 + visits[i]);
+            double u = q + bonus;
+            if (u > bestVal) { bestVal = u; best = i; }
         }
         return best;
+    }
+
+    /**
+     * Heuristic prior over a player's arms, computed once when a node is populated.
+     * The raw score for each (src, tgt) arm uses the same domain factors as
+     * GreedyHeuristicAgent — net capture margin, distance, growth rate — but
+     * combined into a per-pair score. DoNothing gets a flat low score. Softmax
+     * with priorTemperature converts scores into a probability distribution.
+     */
+    private double[] computePrior(GameState s, int[] sources, int[] targets, int[] armEncoding) {
+        double[] scores = new double[armEncoding.length];
+        double speed = getParams().getTransporterSpeed();
+
+        for (int i = 0; i < armEncoding.length; i++) {
+            int pair = armEncoding[i];
+            if (pair == DO_NOTHING_PAIR) {
+                scores[i] = -2.0;        // mild discouragement, not exclusion
+                continue;
+            }
+            int srcIdx = (pair >>> 8) & 0xFF;
+            int tgtIdx = pair & 0xFF;
+            Planet src = s.getPlanets().get(sources[srcIdx]);
+            Planet tgt = s.getPlanets().get(targets[tgtIdx]);
+            double distance = src.getPosition().distance(tgt.getPosition());
+            double traversalTicks = distance / speed;
+            double estimatedDefense = tgt.getNShips() + tgt.getGrowthRate() * traversalTicks;
+            double myAttackShips = src.getNShips() * shipsFraction;
+            double netCapture = myAttackShips - estimatedDefense;   // positive => can take it
+            double normalizedDistance = distance / 800.0;           // typical max ~640px
+            double growthBonus = tgt.getGrowthRate() * 50.0;         // up to ~10 at max growth
+            scores[i] = netCapture + growthBonus - 2.0 * normalizedDistance;
+        }
+
+        // Softmax with temperature
+        double maxScore = Double.NEGATIVE_INFINITY;
+        for (double sc : scores) if (sc > maxScore) maxScore = sc;
+        double sum = 0.0;
+        double[] probs = new double[scores.length];
+        for (int i = 0; i < scores.length; i++) {
+            probs[i] = Math.exp((scores[i] - maxScore) / priorTemperature);
+            sum += probs[i];
+        }
+        if (sum <= 0.0) {
+            // degenerate fallback: uniform
+            for (int i = 0; i < probs.length; i++) probs[i] = 1.0 / probs.length;
+        } else {
+            for (int i = 0; i < probs.length; i++) probs[i] /= sum;
+        }
+        return probs;
     }
 
     /** Build the flat arm-encoding list: one entry per (src,tgt) pair, plus DoNothing at the end. */
