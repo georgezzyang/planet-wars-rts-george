@@ -24,33 +24,30 @@ fun main() {
     // This lets us iterate scoring tweaks at 25-30x the speed of a PUCT benchmark.
     // Once the heuristic is dialed in, the SAME scoring formula goes back into
     // UCTAgent.computePrior() for compound gains.
-    val GAMES_PER_PAIR = 30
+    val GAMES_PER_PAIR = 100
 
-    // v7: new mechanisms + EvoAgent (RHEA) joins for top-end check.
-    // "best" = minSrc10 + minG0.07 + g100 (winner from v6).
-    val best = { HeuristicAgent().apply {
+    // v10: clean final comparison. Top candidates vs stable references, N=100 per pair for
+    // tight CIs (std err ~1.6%). 8 agents, no weight collisions in getAgentType.
+    val base = { HeuristicAgent().apply {
         minSourceShips = 10.0
         minTargetGrowth = 0.07
         weightGrowth = 100.0
     }}
     val agents: MutableList<PlanetWarsAgent> = mutableListOf(
-        best(),                                                                              // current best (control)
-        best().apply { multiSourcePower = true },                                            // +multi-source coord
-        best().apply { preserveProductionSources = true },                                   // +production penalty
-        best().apply { distanceDiscountedGrowth = true },                                    // +game-time-aware growth
-        best().apply {                                                                       // all 3 new combined
-            multiSourcePower = true
+        // candidates (top of each evolution)
+        base(),                                                                              // v6 winner
+        base().apply { preserveProductionSources = true },                                   // v7 winner
+        base().apply { preserveProductionSources = true; counterattackRisk = true },        // v8/v9 candidate: preserveProd + counter
+        base().apply {                                                                       // v8 all-4 winner
             preserveProductionSources = true
-            distanceDiscountedGrowth = true
+            counterattackRisk = true
+            attackMomentum = true
+            gameStageAwareness = true
+            threatResponse = true
         },
+        // stable references
         HeuristicAgent(),                                                                    // vanilla
         GreedyHeuristicAgent(),
-        SimpleEvoAgent(                                                                      // RHEA — top baseline
-            useShiftBuffer = true,
-            nEvals = 50,
-            sequenceLength = 400,
-            probMutation = 0.8,
-        ),
     )
 
     println("=== Benchmark: NaiveMCTS vs baselines ===")

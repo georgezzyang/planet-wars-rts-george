@@ -98,6 +98,27 @@ public class HeuristicAgent extends PlanetWarsPlayer {
     public boolean distanceDiscountedGrowth = false;
     public double estimatedGameTime = 600.0;
 
+    // ---- v8 features (multi-dimension exploration) ----
+    /** Temporal axis: adjust weights based on game tick. Early game = grab growth, late = consolidate. */
+    public boolean gameStageAwareness = false;
+    public int earlyGameThreshold = 200;
+    public int lateGameThreshold = 800;
+
+    /** Defensive axis: if a friendly planet is under critical incoming-enemy threat AND a source
+     *  can reinforce in time with enough ships, defend instead of attack. */
+    public boolean threatResponse = false;
+
+    /** Counterattack-risk axis: penalize targets surrounded by many opponent planets
+     *  (counterattack staging grounds). */
+    public boolean counterattackRisk = false;
+    public double counterattackPenaltyPerNeighbor = 3.0;
+    public double counterattackRadius = 300.0;
+
+    /** Momentum axis: bonus for attacking targets near my existing territory (continue push). */
+    public boolean attackMomentum = false;
+    public double momentumBonusPerNeighbor = 2.0;
+    public double momentumRadius = 300.0;
+
     // ---- Tunable weights ----
     public double weightNetCapture = 1.0;
     public double weightGrowth = 50.0;
@@ -127,6 +148,12 @@ public class HeuristicAgent extends PlanetWarsPlayer {
         }
         if (mySources.isEmpty()) return doNothing();
 
+        // v8: threat response — short-circuit to a defensive send if a friendly is about to fall
+        if (threatResponse) {
+            Action defensive = findDefensiveAction(state, me, opp, mySources);
+            if (defensive != null) return defensive;
+        }
+
         // Strategic context: compute dynamic ship fraction based on lead/deficit
         double effectiveShipsFraction = shipsFraction;
         if (strategicContext) {
@@ -139,6 +166,18 @@ public class HeuristicAgent extends PlanetWarsPlayer {
                 double ratio = myTotal / oppTotal;
                 if (ratio > 2.0) effectiveShipsFraction = 0.3;       // way ahead: conserve
                 else if (ratio < 0.5) effectiveShipsFraction = 0.7;  // way behind: all-in
+            }
+        }
+
+        // v8: game stage awareness — adjust weights based on game tick
+        double effectiveWeightGrowth = weightGrowth;
+        double effectiveWeightDistance = weightDistance;
+        if (gameStageAwareness) {
+            int tick = state.getGameTick();
+            if (tick < earlyGameThreshold) {
+                effectiveWeightGrowth = weightGrowth * 1.5;        // grab production
+            } else if (tick > lateGameThreshold) {
+                effectiveWeightDistance = weightDistance * 1.5;    // consolidate
             }
         }
 
@@ -189,7 +228,8 @@ public class HeuristicAgent extends PlanetWarsPlayer {
         Planet bestTgt = null;
         for (Planet src : mySources) {
             for (Planet tgt : targets) {
-                double s = scoreAction(src, tgt, state, me);
+                double s = scoreAction(src, tgt, state, me, opp,
+                                       effectiveWeightGrowth, effectiveWeightDistance);
                 if (s > bestScore) {
                     bestScore = s;
                     bestSrc = src;
@@ -207,7 +247,8 @@ public class HeuristicAgent extends PlanetWarsPlayer {
     }
 
     /** Score a single (src, tgt) pair. Higher = better. */
-    private double scoreAction(Planet src, Planet tgt, GameState state, Player me) {
+    private double scoreAction(Planet src, Planet tgt, GameState state, Player me, Player opp,
+                                double effWeightGrowth, double effWeightDistance) {
         double distance = src.getPosition().distance(tgt.getPosition());
         double speed = getParams().getTransporterSpeed();
         double traversalTicks = distance / speed;
@@ -234,14 +275,14 @@ public class HeuristicAgent extends PlanetWarsPlayer {
         if (distanceDiscountedGrowth) {
             // Growth bonus weighted by remaining game time after arrival
             double remainingAfterArrival = Math.max(50.0, estimatedGameTime - state.getGameTick() - traversalTicks);
-            growthBonus = tgt.getGrowthRate() * remainingAfterArrival * (weightGrowth / 50.0);
+            growthBonus = tgt.getGrowthRate() * remainingAfterArrival * (effWeightGrowth / 50.0);
         } else {
-            growthBonus = tgt.getGrowthRate() * weightGrowth;
+            growthBonus = tgt.getGrowthRate() * effWeightGrowth;
         }
 
         double score = weightNetCapture * netCapture
                      + growthBonus
-                     - weightDistance * normalizedDistance;
+                     - effWeightDistance * normalizedDistance;
 
         if (sourceVulnerabilityPenalty) {
             double afterAttack = src.getNShips() - attackShips;
@@ -255,7 +296,6 @@ public class HeuristicAgent extends PlanetWarsPlayer {
         }
 
         if (multiSourcePower) {
-            // Count my free sources within 1.2x of my distance to this target
             int nearbyCount = 0;
             for (Planet otherSrc : state.getPlanets()) {
                 if (otherSrc == src) continue;
@@ -268,7 +308,64 @@ public class HeuristicAgent extends PlanetWarsPlayer {
             score += nearbyCount * multiSourceWeight;
         }
 
+        // v8: counterattack risk — opp-density around target
+        if (counterattackRisk) {
+            int oppNearby = 0;
+            for (Planet p : state.getPlanets()) {
+                if (p.getOwner() != opp) continue;
+                if (p == tgt) continue;
+                if (p.getPosition().distance(tgt.getPosition()) < counterattackRadius) oppNearby++;
+            }
+            score -= oppNearby * counterattackPenaltyPerNeighbor;
+        }
+
+        // v8: attack momentum — bonus for targets near my existing territory
+        if (attackMomentum) {
+            int myNearby = 0;
+            for (Planet p : state.getPlanets()) {
+                if (p.getOwner() != me) continue;
+                if (p == src) continue;
+                if (p.getPosition().distance(tgt.getPosition()) < momentumRadius) myNearby++;
+            }
+            score += myNearby * momentumBonusPerNeighbor;
+        }
+
         return score;
+    }
+
+    /**
+     * v8: scan for friendly planets that will fall to incoming enemy ships. If found and a
+     * source can reinforce in time with enough ships, return that defensive action.
+     */
+    private Action findDefensiveAction(GameState state, Player me, Player opp, List<Planet> mySources) {
+        double speed = getParams().getTransporterSpeed();
+        for (Planet threatened : state.getPlanets()) {
+            if (threatened.getOwner() != me) continue;
+            // Find earliest critical enemy transporter
+            for (Planet p : state.getPlanets()) {
+                if (p.getTransporter() == null) continue;
+                if (p.getTransporter().getOwner() != opp) continue;
+                if (p.getTransporter().getDestinationIndex() != threatened.getId()) continue;
+                double remainingDist = p.getTransporter().getS().distance(threatened.getPosition());
+                double enemyArrivalTicks = remainingDist / speed;
+                double myShipsAtArrival = threatened.getNShips()
+                        + threatened.getGrowthRate() * enemyArrivalTicks;
+                if (p.getTransporter().getNShips() <= myShipsAtArrival) continue; // not critical
+                double shortage = p.getTransporter().getNShips() - myShipsAtArrival;
+                // Find closest source that can arrive in time with enough ships
+                for (Planet src : mySources) {
+                    if (src == threatened) continue;
+                    double srcDist = src.getPosition().distance(threatened.getPosition());
+                    double srcArrival = srcDist / speed;
+                    if (srcArrival >= enemyArrivalTicks) continue;       // too slow
+                    double available = src.getNShips() * shipsFraction;
+                    if (available <= shortage + 2.0) continue;           // not enough
+                    double sendShips = Math.max(shortage + 2.0, src.getNShips() * 0.3);
+                    return new Action(me, src.getId(), threatened.getId(), sendShips);
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -317,6 +414,10 @@ public class HeuristicAgent extends PlanetWarsPlayer {
         if (multiSourcePower) sb.append("+multiSrc");
         if (preserveProductionSources) sb.append("+preserveProd");
         if (distanceDiscountedGrowth) sb.append("+distGrowth");
+        if (gameStageAwareness) sb.append("+stage");
+        if (threatResponse) sb.append("+threat");
+        if (counterattackRisk) sb.append("+counter").append(counterattackPenaltyPerNeighbor);
+        if (attackMomentum) sb.append("+momentum").append(momentumBonusPerNeighbor);
         if (weightGrowth != 50.0) sb.append("+g").append((int) weightGrowth);
         if (weightDistance != 2.0) sb.append("+d").append(weightDistance);
         return sb.toString();
