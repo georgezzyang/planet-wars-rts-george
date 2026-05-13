@@ -21,17 +21,19 @@ fun main() {
     val gameParams = GameParams(numPlanets = 12, maxTicks = 1200)
     val GAMES_PER_PAIR = 6
 
+    // Smaller agent pool for faster iteration: UCT (new baseline) vs the strongest reference
+    // agents we have (Greedy, EvoAgent) and one random sanity. Drop Flat/NaiveMCTS and the
+    // weaker random to keep the round-robin under ~10 min while still giving signal.
     val agents: MutableList<PlanetWarsAgent> = mutableListOf(
-        NaiveMCTSAgent(),
-        GreedyHeuristicAgent(),
-        SimpleEvoAgent(
+        UCTAgent(),                        // primary: Decoupled UCT, our MCTS baseline
+        GreedyHeuristicAgent(),            // heuristic reference
+        SimpleEvoAgent(                    // RHEA reference (currently strongest)
             useShiftBuffer = true,
             nEvals = 50,
             sequenceLength = 400,
             probMutation = 0.8,
         ),
-        BetterRandomAgent(),
-        CarefulRandomAgent(),
+        CarefulRandomAgent(),              // bottom of the curve
     )
 
     println("=== Benchmark: NaiveMCTS vs baselines ===")
