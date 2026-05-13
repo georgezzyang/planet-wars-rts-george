@@ -3,9 +3,12 @@ package competition_entry
 import games.planetwars.agents.PlanetWarsAgent
 import games.planetwars.agents.random.CarefulRandomAgent
 import games.planetwars.core.GameParams
+import games.planetwars.core.GameState
 import games.planetwars.core.GameStateFactory
+import games.planetwars.core.Planet
 import games.planetwars.core.Player
 import games.planetwars.runners.GameRunner
+import kotlin.math.sqrt
 
 /**
  * Per-map analysis: run each candidate on K different fixed-seed maps and report per-map
@@ -39,37 +42,37 @@ fun main() {
         newMapEachRun = false,                  // re-use same gameState across N games per pair
     )
 
-    // Candidates: vanilla + key configs we want to compare
+    // v13 candidates: keep top configs from v11/v12 + weight variants for tuning
+    val v11Base = { HeuristicAgent().apply {
+        minTargetGrowth = 0.07; weightGrowth = 100.0
+        preserveProductionSources = true
+        counterattackRisk = true
+        attackMomentum = true
+        gameStageAwareness = true
+        threatResponse = true
+    }}
     val candidates: List<Pair<String, () -> PlanetWarsAgent>> = listOf(
         "vanilla" to { HeuristicAgent() },
-        "g100" to { HeuristicAgent().apply { weightGrowth = 100.0 } },
-        "preserveProd" to { HeuristicAgent().apply { preserveProductionSources = true } },
-        "v6-best" to { HeuristicAgent().apply {
-            minSourceShips = 10.0; minTargetGrowth = 0.07; weightGrowth = 100.0
+        "v11" to { v11Base() },
+        // minG fine sweep (0.07 was v11 default, 0.05 was v13 winner)
+        "minG0.03" to { v11Base().apply { minTargetGrowth = 0.03 } },
+        "minG0.05" to { v11Base().apply { minTargetGrowth = 0.05 } },
+        "minG0.06" to { v11Base().apply { minTargetGrowth = 0.06 } },
+        // Best combos
+        "minG0.05+fp" to { v11Base().apply { minTargetGrowth = 0.05; useMapFingerprint = true } },
+        "minG0.05+counter2" to { v11Base().apply {
+            minTargetGrowth = 0.05; counterattackPenaltyPerNeighbor = 2.0
         }},
-        "v10-all5" to { HeuristicAgent().apply {
-            minSourceShips = 10.0; minTargetGrowth = 0.07; weightGrowth = 100.0
-            preserveProductionSources = true
-            counterattackRisk = true
-            attackMomentum = true
-            gameStageAwareness = true
-            threatResponse = true
+        "minG0.05+counter4" to { v11Base().apply {
+            minTargetGrowth = 0.05; counterattackPenaltyPerNeighbor = 4.0
         }},
-        "v11-minus-minSrc" to { HeuristicAgent().apply {
-            minTargetGrowth = 0.07; weightGrowth = 100.0
-            preserveProductionSources = true
-            counterattackRisk = true
-            attackMomentum = true
-            gameStageAwareness = true
-            threatResponse = true
+        "minG0.05+momentum3" to { v11Base().apply {
+            minTargetGrowth = 0.05; momentumBonusPerNeighbor = 3.0
         }},
-        "v12-fingerprint" to { HeuristicAgent().apply {
-            minTargetGrowth = 0.07; weightGrowth = 100.0
-            preserveProductionSources = true
-            counterattackRisk = true
-            attackMomentum = true
-            gameStageAwareness = true
-            threatResponse = true
+        "minG0.05+all-tuned" to { v11Base().apply {
+            minTargetGrowth = 0.05
+            counterattackPenaltyPerNeighbor = 2.0
+            momentumBonusPerNeighbor = 3.0
             useMapFingerprint = true
         }},
     )
@@ -89,8 +92,8 @@ fun main() {
         println("Opponent: ${opp.name}   gamesPerSide=$gamesPerSide   mapSeeds=${mapSeeds.size}")
         println("========================================================================")
 
-        // Header
-        print("seed\t")
+        // Header with fingerprint columns + candidate columns
+        print("seed\tdist\tgStd\tgMean\tn\t")
         for ((name, _) in candidates) print("$name\t")
         println()
 
@@ -99,7 +102,10 @@ fun main() {
         for ((name, _) in candidates) perCandidate[name] = mutableListOf()
 
         for (seed in mapSeeds) {
-            print("$seed\t")
+            // Compute & print fingerprint of this seed's map
+            val fpState = GameStateFactory(gameParams, seed = seed).createGame()
+            val fp = computeFingerprintExternal(fpState)
+            print("$seed\t${"%.0f".format(fp.meanDist)}\t${"%.3f".format(fp.growthStd)}\t${"%.3f".format(fp.meanGrowth)}\t${fp.n}\t")
             for ((name, makeCandidate) in candidates) {
                 // Play candidate as P1
                 val candidateA = makeCandidate()
@@ -129,8 +135,24 @@ fun main() {
         for ((name, rates) in perCandidate) {
             val mean = rates.average()
             val variance = rates.map { (it - mean) * (it - mean) }.average()
-            val std = Math.sqrt(variance)
+            val std = sqrt(variance)
             println("${name.padEnd(20)}  mean=${"%5.1f".format(mean)}%  std=${"%5.1f".format(std)}")
         }
     }
+}
+
+private data class FpExt(val meanGrowth: Double, val growthStd: Double, val meanDist: Double, val n: Int)
+
+private fun computeFingerprintExternal(state: GameState): FpExt {
+    val planets = state.planets
+    val n = planets.size
+    val meanG = planets.map { it.growthRate }.average()
+    val gStd = sqrt(planets.map { (it.growthRate - meanG).let { d -> d * d } }.average())
+    var sumDist = 0.0
+    var pairs = 0
+    for (i in 0 until n) for (j in i + 1 until n) {
+        sumDist += planets[i].position.distance(planets[j].position); pairs++
+    }
+    val meanD = if (pairs > 0) sumDist / pairs else 0.0
+    return FpExt(meanG, gStd, meanD, n)
 }
