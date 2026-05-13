@@ -19,19 +19,38 @@ import games.planetwars.runners.RoundRobinLeague
  */
 fun main() {
     val gameParams = GameParams(numPlanets = 12, maxTicks = 1200)
-    val GAMES_PER_PAIR = 10
+    // FAST HEURISTIC ITERATION MODE
+    // All agents below are deterministic / non-search, so a game takes ~1s instead of ~30s.
+    // This lets us iterate scoring tweaks at 25-30x the speed of a PUCT benchmark.
+    // Once the heuristic is dialed in, the SAME scoring formula goes back into
+    // UCTAgent.computePrior() for compound gains.
+    val GAMES_PER_PAIR = 30
 
+    // v7: new mechanisms + EvoAgent (RHEA) joins for top-end check.
+    // "best" = minSrc10 + minG0.07 + g100 (winner from v6).
+    val best = { HeuristicAgent().apply {
+        minSourceShips = 10.0
+        minTargetGrowth = 0.07
+        weightGrowth = 100.0
+    }}
     val agents: MutableList<PlanetWarsAgent> = mutableListOf(
-        UCTAgent(),                                    // vanilla Decoupled UCT (UCB1)
-        UCTAgent().apply { useHeuristicPrior = true }, // PUCT variant — same code, prior on
+        best(),                                                                              // current best (control)
+        best().apply { multiSourcePower = true },                                            // +multi-source coord
+        best().apply { preserveProductionSources = true },                                   // +production penalty
+        best().apply { distanceDiscountedGrowth = true },                                    // +game-time-aware growth
+        best().apply {                                                                       // all 3 new combined
+            multiSourcePower = true
+            preserveProductionSources = true
+            distanceDiscountedGrowth = true
+        },
+        HeuristicAgent(),                                                                    // vanilla
         GreedyHeuristicAgent(),
-        SimpleEvoAgent(
+        SimpleEvoAgent(                                                                      // RHEA — top baseline
             useShiftBuffer = true,
             nEvals = 50,
             sequenceLength = 400,
             probMutation = 0.8,
         ),
-        CarefulRandomAgent(),
     )
 
     println("=== Benchmark: NaiveMCTS vs baselines ===")
