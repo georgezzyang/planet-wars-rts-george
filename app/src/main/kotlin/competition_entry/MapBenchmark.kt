@@ -35,7 +35,9 @@ import kotlin.math.sqrt
  * Run: ./gradlew :app:benchmarkMaps
  */
 fun main() {
-    val mapSeeds = (1L..30L).toList()           // 30 distinct map geometries
+    // Use 10 map seeds when search agents are in the pool (UCT/FlatMC are ~30s/game);
+    // use 30 for fast-only benchmarks.
+    val mapSeeds = (1L..10L).toList()
     val gameParams = GameParams(
         numPlanets = 12,
         maxTicks = 1200,
@@ -51,33 +53,12 @@ fun main() {
         gameStageAwareness = true
         threatResponse = true
     }}
+    // v16: small comparison set — heuristic ceiling vs PUCT variants (UCT slow)
     val candidates: List<Pair<String, () -> PlanetWarsAgent>> = listOf(
-        "vanilla" to { HeuristicAgent() },
-        "v11" to { v11Base() },
-        // minG fine sweep (0.07 was v11 default, 0.05 was v13 winner)
-        "minG0.03" to { v11Base().apply { minTargetGrowth = 0.03 } },
-        "minG0.05" to { v11Base().apply { minTargetGrowth = 0.05 } },
-        "minG0.06" to { v11Base().apply { minTargetGrowth = 0.06 } },
-        // Best combos
-        "minG0.05+fp" to { v11Base().apply { minTargetGrowth = 0.05; useMapFingerprint = true } },
-        "minG0.05+counter2" to { v11Base().apply {
-            minTargetGrowth = 0.05; counterattackPenaltyPerNeighbor = 2.0
-        }},
-        "minG0.05+counter4" to { v11Base().apply {
-            minTargetGrowth = 0.05; counterattackPenaltyPerNeighbor = 4.0
-        }},
-        "minG0.05+momentum3" to { v11Base().apply {
-            minTargetGrowth = 0.05; momentumBonusPerNeighbor = 3.0
-        }},
-        "minG0.05+all-tuned" to { v11Base().apply {
-            minTargetGrowth = 0.05
-            counterattackPenaltyPerNeighbor = 2.0
-            momentumBonusPerNeighbor = 3.0
-            useMapFingerprint = true
-        }},
-        // v15: Flat MC with strong heuristic — the bridge between pure heuristic and PUCT
-        "FlatMC-topK8" to { FlatMCAgent() },
-        "FlatMC-topK5" to { FlatMCAgent().apply { topK = 5 } },
+        "Heuristic-best" to { v11Base().apply { minTargetGrowth = 0.05 } },
+        "UCT-vanilla" to { UCTAgent() },
+        "PUCT-v1-prior" to { UCTAgent().apply { useHeuristicPrior = true } },
+        "PUCT-v14-prior" to { UCTAgent().apply { useHeuristicPrior = true; priorV14 = true } },
     )
 
     // Fixed opponent. Use a stochastic one (CarefulRandom) so different N games on the

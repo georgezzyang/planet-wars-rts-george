@@ -83,6 +83,11 @@ public class UCTAgent extends PlanetWarsPlayer {
     public double priorTemperature = 2.0;
     /** PUCT exploration constant — the c in c * P(a) * sqrt(N) / (1 + n_a). */
     public double priorWeight = 2.0;
+    /** When true (with useHeuristicPrior also true) use the v14 strong prior:
+     *  v14 weightGrowth=100, preserveProductionSources penalty, counterattackRisk penalty,
+     *  attackMomentum bonus, gameStage modulation, minTargetGrowth filter at 0.05.
+     *  This is the HeuristicAgent v14 scoring formula imported as a PUCT prior. */
+    public boolean priorV14 = false;
 
     // ---- Models ----
     private final PlanetWarsAgent opponentRolloutPolicy = new GreedyHeuristicAgent();
@@ -197,7 +202,8 @@ public class UCTAgent extends PlanetWarsPlayer {
 
     @Override
     public String getAgentType() {
-        return useHeuristicPrior ? "UCT-puct-v2" : "UCT-decoupled-v1";
+        if (!useHeuristicPrior) return "UCT-decoupled-v1";
+        return priorV14 ? "UCT-puct-v14" : "UCT-puct-v2";
     }
 
     // =====================================================================
@@ -250,8 +256,13 @@ public class UCTAgent extends PlanetWarsPlayer {
             oppVisits = new int[oppArmEncoding.length];
 
             if (useHeuristicPrior) {
-                myPrior = computePrior(s, mySources, myTargets, myArmEncoding);
-                oppPrior = computePrior(s, oppSources, oppTargets, oppArmEncoding);
+                if (priorV14) {
+                    myPrior = computePriorV14(s, mySources, myTargets, myArmEncoding, me, opp);
+                    oppPrior = computePriorV14(s, oppSources, oppTargets, oppArmEncoding, opp, me);
+                } else {
+                    myPrior = computePrior(s, mySources, myTargets, myArmEncoding);
+                    oppPrior = computePrior(s, oppSources, oppTargets, oppArmEncoding);
+                }
             }
         }
 
@@ -382,6 +393,99 @@ public class UCTAgent extends PlanetWarsPlayer {
         }
         if (sum <= 0.0) {
             // degenerate fallback: uniform
+            for (int i = 0; i < probs.length; i++) probs[i] = 1.0 / probs.length;
+        } else {
+            for (int i = 0; i < probs.length; i++) probs[i] /= sum;
+        }
+        return probs;
+    }
+
+    /**
+     * v14 prior: imports the strong-heuristic scoring (weightGrowth=100,
+     * preserveProductionSources, counterattackRisk, attackMomentum, gameStage
+     * modulation, minTargetGrowth=0.05 filter) into PUCT.
+     *
+     * Per-arm score features:
+     *   + net_capture                          (attack_ships - estimated_defense)
+     *   + growth_bonus                         (target.growth × effWeightGrowth)
+     *   - distance penalty                     (effWeightDistance × distance / 800)
+     *   - preserveProductionSources penalty    (src.growth × 30)
+     *   - counterattackRisk penalty            (3 × #opp planets within 300 of target)
+     *   + attackMomentum bonus                 (2 × #my planets within 300 of target)
+     * Targets with growth < 0.05 score very low (filter).
+     * gameStage: tick<200 → weightGrowth×1.5; tick>800 → weightDistance×1.5.
+     */
+    private double[] computePriorV14(GameState s, int[] sources, int[] targets, int[] armEncoding,
+                                      Player forPlayer, Player otherPlayer) {
+        double[] scores = new double[armEncoding.length];
+        double speed = getParams().getTransporterSpeed();
+
+        double effWeightGrowth = 100.0;
+        double effWeightDistance = 2.0;
+        int tick = s.getGameTick();
+        if (tick < 200) effWeightGrowth *= 1.5;
+        else if (tick > 800) effWeightDistance *= 1.5;
+
+        for (int i = 0; i < armEncoding.length; i++) {
+            int pair = armEncoding[i];
+            if (pair == DO_NOTHING_PAIR) {
+                scores[i] = -2.0;
+                continue;
+            }
+            int srcIdx = (pair >>> 8) & 0xFF;
+            int tgtIdx = pair & 0xFF;
+            Planet src = s.getPlanets().get(sources[srcIdx]);
+            Planet tgt = s.getPlanets().get(targets[tgtIdx]);
+
+            // minTargetGrowth=0.05 filter — drop very low-growth targets to near-zero probability
+            if (tgt.getGrowthRate() < 0.05) {
+                scores[i] = -20.0;
+                continue;
+            }
+
+            double distance = src.getPosition().distance(tgt.getPosition());
+            double traversalTicks = distance / speed;
+            double estimatedDefense = tgt.getNShips() + tgt.getGrowthRate() * traversalTicks;
+            double myAttackShips = src.getNShips() * shipsFraction;
+            double netCapture = myAttackShips - estimatedDefense;
+            double normalizedDistance = distance / 800.0;
+            double growthBonus = tgt.getGrowthRate() * effWeightGrowth;
+
+            double score = netCapture + growthBonus - effWeightDistance * normalizedDistance;
+
+            // preserveProductionSources
+            score -= src.getGrowthRate() * 30.0;
+
+            // counterattackRisk: opp neighbors of target
+            int oppNearby = 0;
+            for (Planet p : s.getPlanets()) {
+                if (p.getOwner() != otherPlayer) continue;
+                if (p == tgt) continue;
+                if (p.getPosition().distance(tgt.getPosition()) < 300.0) oppNearby++;
+            }
+            score -= oppNearby * 3.0;
+
+            // attackMomentum: forPlayer neighbors of target
+            int myNearby = 0;
+            for (Planet p : s.getPlanets()) {
+                if (p.getOwner() != forPlayer) continue;
+                if (p == src) continue;
+                if (p.getPosition().distance(tgt.getPosition()) < 300.0) myNearby++;
+            }
+            score += myNearby * 2.0;
+
+            scores[i] = score;
+        }
+
+        double maxScore = Double.NEGATIVE_INFINITY;
+        for (double sc : scores) if (sc > maxScore) maxScore = sc;
+        double sum = 0.0;
+        double[] probs = new double[scores.length];
+        for (int i = 0; i < scores.length; i++) {
+            probs[i] = Math.exp((scores[i] - maxScore) / priorTemperature);
+            sum += probs[i];
+        }
+        if (sum <= 0.0) {
             for (int i = 0; i < probs.length; i++) probs[i] = 1.0 / probs.length;
         } else {
             for (int i = 0; i < probs.length; i++) probs[i] /= sum;
