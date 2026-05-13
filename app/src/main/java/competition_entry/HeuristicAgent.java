@@ -119,6 +119,14 @@ public class HeuristicAgent extends PlanetWarsPlayer {
     public double momentumBonusPerNeighbor = 2.0;
     public double momentumRadius = 300.0;
 
+    // ---- v12 feature: map fingerprint adaptive prior ----
+    /** When true, classify the map at the start of the game and adjust effective weights
+     *  (weightGrowth, weightDistance, minTargetGrowth) accordingly. Different map types
+     *  reward different play styles: dense maps -> emphasise growth; sparse maps ->
+     *  emphasise distance; low-growth-variance maps -> drop the minTargetGrowth filter
+     *  because there's nothing meaningfully low to filter. */
+    public boolean useMapFingerprint = false;
+
     // ---- Tunable weights ----
     public double weightNetCapture = 1.0;
     public double weightGrowth = 50.0;
@@ -172,6 +180,7 @@ public class HeuristicAgent extends PlanetWarsPlayer {
         // v8: game stage awareness — adjust weights based on game tick
         double effectiveWeightGrowth = weightGrowth;
         double effectiveWeightDistance = weightDistance;
+        double effectiveMinTargetGrowth = minTargetGrowth;
         if (gameStageAwareness) {
             int tick = state.getGameTick();
             if (tick < earlyGameThreshold) {
@@ -181,13 +190,33 @@ public class HeuristicAgent extends PlanetWarsPlayer {
             }
         }
 
+        // v12: map fingerprint — classify map and adjust effective weights
+        if (useMapFingerprint) {
+            Fingerprint fp = computeFingerprint(state);
+            // Dense (close planets) → grab growth; sparse → respect distance
+            if (fp.meanInterPlanetDistance < 200.0) {
+                effectiveWeightGrowth *= 1.3;
+                effectiveWeightDistance *= 0.7;
+            } else if (fp.meanInterPlanetDistance > 350.0) {
+                effectiveWeightGrowth *= 0.8;
+                effectiveWeightDistance *= 1.3;
+            }
+            // Low growth variance → no meaningfully-low target to filter, disable minG filter
+            if (fp.growthStd < 0.02) {
+                effectiveMinTargetGrowth = 0.0;
+            } else if (fp.growthStd > 0.04 && effectiveMinTargetGrowth == 0.0) {
+                // High variance and no manual filter → enable a modest filter
+                effectiveMinTargetGrowth = 0.07;
+            }
+        }
+
         List<Planet> targets = !oppTargets.isEmpty() ? oppTargets : neutralTargets;
         if (targets.isEmpty()) return doNothing();
 
-        // v3: filter targets by minimum growth rate
-        if (minTargetGrowth > 0.0) {
+        // v3: filter targets by minimum growth rate (effective value, adjusted by fingerprint)
+        if (effectiveMinTargetGrowth > 0.0) {
             List<Planet> filtered = new ArrayList<>();
-            for (Planet t : targets) if (t.getGrowthRate() >= minTargetGrowth) filtered.add(t);
+            for (Planet t : targets) if (t.getGrowthRate() >= effectiveMinTargetGrowth) filtered.add(t);
             if (!filtered.isEmpty()) targets = filtered;
         }
 
@@ -398,6 +427,52 @@ public class HeuristicAgent extends PlanetWarsPlayer {
         return new Action(Player.Neutral, -1, -1, 0.0);
     }
 
+    /**
+     * v12: compute a fingerprint of the current map geometry & growth distribution.
+     * Used by useMapFingerprint to adjust effective weights per game.
+     * O(N^2) on planet count, called once per tick — for N≤30 this is ~900 ops, negligible.
+     */
+    private static Fingerprint computeFingerprint(GameState state) {
+        List<Planet> planets = state.getPlanets();
+        int n = planets.size();
+
+        double sumGrowth = 0;
+        for (Planet p : planets) sumGrowth += p.getGrowthRate();
+        double meanGrowth = sumGrowth / n;
+
+        double sumSqGrowth = 0;
+        for (Planet p : planets) {
+            double d = p.getGrowthRate() - meanGrowth;
+            sumSqGrowth += d * d;
+        }
+        double growthStd = Math.sqrt(sumSqGrowth / n);
+
+        double sumDist = 0;
+        int pairs = 0;
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                sumDist += planets.get(i).getPosition().distance(planets.get(j).getPosition());
+                pairs++;
+            }
+        }
+        double meanDist = pairs > 0 ? sumDist / pairs : 0.0;
+
+        return new Fingerprint(meanGrowth, growthStd, meanDist, n);
+    }
+
+    private static final class Fingerprint {
+        final double meanGrowth;
+        final double growthStd;
+        final double meanInterPlanetDistance;
+        final int numPlanets;
+        Fingerprint(double meanGrowth, double growthStd, double meanDist, int n) {
+            this.meanGrowth = meanGrowth;
+            this.growthStd = growthStd;
+            this.meanInterPlanetDistance = meanDist;
+            this.numPlanets = n;
+        }
+    }
+
     @Override
     public String getAgentType() {
         StringBuilder sb = new StringBuilder("Heuristic");
@@ -418,6 +493,7 @@ public class HeuristicAgent extends PlanetWarsPlayer {
         if (threatResponse) sb.append("+threat");
         if (counterattackRisk) sb.append("+counter").append(counterattackPenaltyPerNeighbor);
         if (attackMomentum) sb.append("+momentum").append(momentumBonusPerNeighbor);
+        if (useMapFingerprint) sb.append("+fingerprint");
         if (weightGrowth != 50.0) sb.append("+g").append((int) weightGrowth);
         if (weightDistance != 2.0) sb.append("+d").append(weightDistance);
         return sb.toString();

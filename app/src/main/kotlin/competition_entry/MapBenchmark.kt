@@ -63,6 +63,15 @@ fun main() {
             gameStageAwareness = true
             threatResponse = true
         }},
+        "v12-fingerprint" to { HeuristicAgent().apply {
+            minTargetGrowth = 0.07; weightGrowth = 100.0
+            preserveProductionSources = true
+            counterattackRisk = true
+            attackMomentum = true
+            gameStageAwareness = true
+            threatResponse = true
+            useMapFingerprint = true
+        }},
     )
 
     // Fixed opponent. Use a stochastic one (CarefulRandom) so different N games on the
