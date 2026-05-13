@@ -53,12 +53,14 @@ fun main() {
         gameStageAwareness = true
         threatResponse = true
     }}
-    // v16: small comparison set — heuristic ceiling vs PUCT variants (UCT slow)
+    // v17: isolate tree-reuse mechanism. Compare UCT-vanilla with and without reuse,
+    // see if reuse alone improves search (without prior). Then test reuse + prior combo.
     val candidates: List<Pair<String, () -> PlanetWarsAgent>> = listOf(
         "Heuristic-best" to { v11Base().apply { minTargetGrowth = 0.05 } },
         "UCT-vanilla" to { UCTAgent() },
-        "PUCT-v1-prior" to { UCTAgent().apply { useHeuristicPrior = true } },
-        "PUCT-v14-prior" to { UCTAgent().apply { useHeuristicPrior = true; priorV14 = true } },
+        "UCT-reuse" to { UCTAgent().apply { useTreeReuse = true } },
+        "PUCT-v1" to { UCTAgent().apply { useHeuristicPrior = true } },
+        "PUCT-v1+reuse" to { UCTAgent().apply { useHeuristicPrior = true; useTreeReuse = true } },
     )
 
     // Fixed opponent. Use a stochastic one (CarefulRandom) so different N games on the

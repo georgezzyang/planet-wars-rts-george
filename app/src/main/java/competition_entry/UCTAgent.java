@@ -10,6 +10,7 @@ import games.planetwars.core.Player;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ThreadLocalRandom;
@@ -88,6 +89,13 @@ public class UCTAgent extends PlanetWarsPlayer {
      *  attackMomentum bonus, gameStage modulation, minTargetGrowth filter at 0.05.
      *  This is the HeuristicAgent v14 scoring formula imported as a PUCT prior. */
     public boolean priorV14 = false;
+    /** When true, persist the tree across getAction calls. After each tick, infer the joint
+     *  action that was actually played (my action + opp's action from state diff), find the
+     *  corresponding child of the persistent root, and promote it as the new root. The
+     *  promoted root keeps all its accumulated visits → MCTS effectively gets cumulative
+     *  search budget across the entire game instead of 50ms/tick fresh starts. RHEA-style
+     *  shift-buffer adaptation for MCTS. */
+    public boolean useTreeReuse = false;
 
     // ---- Models ----
     private final PlanetWarsAgent opponentRolloutPolicy = new GreedyHeuristicAgent();
@@ -98,6 +106,11 @@ public class UCTAgent extends PlanetWarsPlayer {
     private Player opp;
     /** Last me-Player we prepared the rollout policies as. null = never prepared. */
     private Player rolloutPoliciesPreparedFor = null;
+
+    // ---- Tree-reuse state (persists across getAction calls) ----
+    private Node persistentRoot = null;
+    private GameState lastState = null;
+    private Action lastMyAction = null;
 
     // Sentinel arm value meaning DoNothing. Stored at the LAST index of each player's arm list.
     private static final int DO_NOTHING_PAIR = 0xFFFF;
@@ -115,17 +128,105 @@ public class UCTAgent extends PlanetWarsPlayer {
             opponentRolloutPolicy.prepareToPlayAs(opp, getParams(), "internal-rollout-opp");
             myRolloutPolicy.prepareToPlayAs(me, getParams(), "internal-rollout-me");
             rolloutPoliciesPreparedFor = me;
+            // Same bug class — tree built for prior player assignment is invalid after switch.
+            persistentRoot = null;
+            lastState = null;
+            lastMyAction = null;
         }
 
-        Node root = new Node();
-        root.populateLegal(rootState);
-        if (root.mySources.length == 0 || root.myTargets.length == 0) return doNothing();
+        Node root = null;
+        if (useTreeReuse && persistentRoot != null && lastState != null && lastMyAction != null) {
+            root = tryReuseRoot(rootState);
+        }
+        if (root == null) {
+            root = new Node();
+            root.populateLegal(rootState);
+        }
+        if (root.mySources.length == 0 || root.myTargets.length == 0) {
+            if (useTreeReuse) {
+                persistentRoot = root;
+                lastState = rootState.deepCopy();
+                lastMyAction = doNothing();
+            }
+            return doNothing();
+        }
 
         Random rng = ThreadLocalRandom.current();
         while (System.currentTimeMillis() < deadline) {
             iterate(root, rootState, rng);
         }
-        return root.bestMyActionAtRoot(rootState);
+        Action best = root.bestMyActionAtRoot(rootState);
+        if (useTreeReuse) {
+            persistentRoot = root;
+            lastState = rootState.deepCopy();
+            lastMyAction = best;
+        }
+        return best;
+    }
+
+    /**
+     * Find the child of persistentRoot corresponding to (lastMyAction, inferredOppAction)
+     * and return it as the new root. Returns null if no matching child exists (then caller
+     * builds fresh).
+     */
+    private Node tryReuseRoot(GameState currentState) {
+        Action inferredOppAction = inferOppAction(lastState, currentState);
+        int myArm = findArmIdx(persistentRoot.mySources, persistentRoot.myTargets, lastMyAction);
+        int oppArm = findArmIdx(persistentRoot.oppSources, persistentRoot.oppTargets, inferredOppAction);
+        if (myArm < 0 || oppArm < 0) return null;
+        int childKey = (myArm << 16) | (oppArm & 0xFFFF);
+        Node next = persistentRoot.children.get(childKey);
+        if (next == null || next.mySources == null) return null;
+        return next;
+    }
+
+    /**
+     * Look for a newly-launched opp transporter by diffing planets between before/after.
+     * A planet whose transporter was null in `before` and non-null in `after`, with
+     * transporter.owner == opp, indicates opp launched there this tick.
+     * 0 or 1 such planets expected (each player launches at most one transporter per tick).
+     */
+    private Action inferOppAction(GameState before, GameState after) {
+        List<Planet> beforeP = before.getPlanets();
+        List<Planet> afterP = after.getPlanets();
+        int n = Math.min(beforeP.size(), afterP.size());
+        for (int i = 0; i < n; i++) {
+            Planet pOld = beforeP.get(i);
+            Planet pNew = afterP.get(i);
+            if (pOld.getTransporter() == null && pNew.getTransporter() != null) {
+                if (pNew.getTransporter().getOwner() == opp) {
+                    return new Action(opp,
+                            pNew.getId(),
+                            pNew.getTransporter().getDestinationIndex(),
+                            pNew.getTransporter().getNShips());
+                }
+            }
+        }
+        return new Action(Player.Neutral, -1, -1, 0.0);   // opp did nothing
+    }
+
+    /**
+     * Given an action and the old root's source/target arrays, return the arm index in the
+     * old root's encoding scheme (srcIdx * targetCount + tgtIdx), or sources.length *
+     * targets.length for DoNothing. Returns -1 if the action's planets aren't in the old
+     * root's legal sets (means tree-reuse should rebuild).
+     */
+    private static int findArmIdx(int[] sources, int[] targets, Action action) {
+        if (action.getSourcePlanetId() == -1) {
+            // DoNothing — last index in the arm array (or index 0 when there were no real arms)
+            int realCount = sources.length * targets.length;
+            return realCount;       // == 0 if sources or targets empty
+        }
+        int srcIdx = -1;
+        for (int i = 0; i < sources.length; i++) {
+            if (sources[i] == action.getSourcePlanetId()) { srcIdx = i; break; }
+        }
+        int tgtIdx = -1;
+        for (int i = 0; i < targets.length; i++) {
+            if (targets[i] == action.getDestinationPlanetId()) { tgtIdx = i; break; }
+        }
+        if (srcIdx < 0 || tgtIdx < 0) return -1;
+        return srcIdx * targets.length + tgtIdx;
     }
 
     /** Single MCTS iteration: select -> expand -> rollout -> backprop. */
@@ -202,8 +303,12 @@ public class UCTAgent extends PlanetWarsPlayer {
 
     @Override
     public String getAgentType() {
-        if (!useHeuristicPrior) return "UCT-decoupled-v1";
-        return priorV14 ? "UCT-puct-v14" : "UCT-puct-v2";
+        StringBuilder sb = new StringBuilder();
+        if (!useHeuristicPrior) sb.append("UCT-decoupled-v1");
+        else if (priorV14) sb.append("UCT-puct-v14");
+        else sb.append("UCT-puct-v2");
+        if (useTreeReuse) sb.append("+reuse");
+        return sb.toString();
     }
 
     // =====================================================================
