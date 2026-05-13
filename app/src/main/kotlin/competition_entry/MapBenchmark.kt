@@ -75,6 +75,9 @@ fun main() {
             momentumBonusPerNeighbor = 3.0
             useMapFingerprint = true
         }},
+        // v15: Flat MC with strong heuristic — the bridge between pure heuristic and PUCT
+        "FlatMC-topK8" to { FlatMCAgent() },
+        "FlatMC-topK5" to { FlatMCAgent().apply { topK = 5 } },
     )
 
     // Fixed opponent. Use a stochastic one (CarefulRandom) so different N games on the
