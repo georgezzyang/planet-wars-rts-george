@@ -50,7 +50,7 @@ tasks.withType<Test>().configureEach {
 
 tasks.withType<Jar> {
     manifest {
-        attributes["Main-Class"] = "client_server.MultiRTSServer"
+        attributes["Main-Class"] = "competition_entry.RunEntryAsServerKt"
     }
 }
 
@@ -58,6 +58,9 @@ tasks.named<ShadowJar>("shadowJar") {
     archiveBaseName.set("client-server")
     archiveClassifier.set("")
     archiveVersion.set("")
+    manifest {
+        attributes["Main-Class"] = "competition_entry.RunEntryAsServerKt"
+    }
 }
 
 
@@ -86,6 +89,11 @@ tasks.register<JavaExec>("runUnifiedExample") {
     classpath = sourceSets["main"].runtimeClasspath
     standardInput = System.`in`
 }
+tasks.register<JavaExec>("benchmarkNaiveMCTS") {
+    mainClass.set("competition_entry.LocalBenchmarkKt")
+    classpath = sourceSets["main"].runtimeClasspath
+}
+
 tasks.register<JavaExec>("runRemotePairEvaluation") {
     // Kotlin entry point above
     mainClass.set("games.planetwars.runners.RunRemotePairEvaluationKt")

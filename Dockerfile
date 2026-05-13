@@ -1,17 +1,23 @@
+# ---------- Stage 1: Build with Gradle wrapper ----------
+FROM eclipse-temurin:21-jdk AS builder
 
+WORKDIR /home/build
 
-# Use Java 20 instead of Java 17
-# This was too brittle: FROM eclipse-temurin:20-jdk
-FROM docker.io/library/eclipse-temurin:20-jdk
+# Copy the entire project (gradle wrapper, sources, build files)
+COPY . .
 
-# Set working directory inside the container
+# Make wrapper executable (Windows clones may strip the +x bit) and build the shadow jar.
+# We build only :app:shadowJar (skips tests) for a fast self-contained build.
+RUN chmod +x gradlew && ./gradlew :app:shadowJar --no-daemon -x test
+
+# ---------- Stage 2: Slim runtime ----------
+FROM eclipse-temurin:21-jre
+
 WORKDIR /app
 
-# Copy the compiled JAR from your Gradle build
-COPY app/build/libs/client-server.jar app.jar
+COPY --from=builder /home/build/app/build/libs/client-server.jar app.jar
 
-# Expose port 8080 for WebSocket communication
+# Submission system expects WebSocket server on port 8080
 EXPOSE 8080
 
-# Run the Kotlin server
 CMD ["java", "-jar", "app.jar"]
