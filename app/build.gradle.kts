@@ -94,6 +94,11 @@ tasks.register<JavaExec>("benchmarkNaiveMCTS") {
     classpath = sourceSets["main"].runtimeClasspath
 }
 
+tasks.register<JavaExec>("benchmarkMaps") {
+    mainClass.set("competition_entry.MapBenchmarkKt")
+    classpath = sourceSets["main"].runtimeClasspath
+}
+
 tasks.register<JavaExec>("runRemotePairEvaluation") {
     // Kotlin entry point above
     mainClass.set("games.planetwars.runners.RunRemotePairEvaluationKt")
