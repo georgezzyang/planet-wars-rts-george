@@ -35,9 +35,8 @@ import kotlin.math.sqrt
  * Run: ./gradlew :app:benchmarkMaps
  */
 fun main() {
-    // Use 10 map seeds when search agents are in the pool (UCT/FlatMC are ~30s/game);
-    // use 30 for fast-only benchmarks.
-    val mapSeeds = (1L..10L).toList()
+    // 30 seeds for heuristic-only meta-analysis (fast).
+    val mapSeeds = (1L..30L).toList()
     val gameParams = GameParams(
         numPlanets = 12,
         maxTicks = 1200,
@@ -53,14 +52,14 @@ fun main() {
         gameStageAwareness = true
         threatResponse = true
     }}
-    // v17: isolate tree-reuse mechanism. Compare UCT-vanilla with and without reuse,
-    // see if reuse alone improves search (without prior). Then test reuse + prior combo.
+    // v18: per-map best-config analysis for meta-heuristic design.
+    // 6 configs spanning the parameter space we've explored, no search agents (fast).
     val candidates: List<Pair<String, () -> PlanetWarsAgent>> = listOf(
-        "Heuristic-best" to { v11Base().apply { minTargetGrowth = 0.05 } },
-        "UCT-vanilla" to { UCTAgent() },
-        "UCT-reuse" to { UCTAgent().apply { useTreeReuse = true } },
-        "PUCT-v1" to { UCTAgent().apply { useHeuristicPrior = true } },
-        "PUCT-v1+reuse" to { UCTAgent().apply { useHeuristicPrior = true; useTreeReuse = true } },
+        "MetaHeuristic-v1" to { MetaHeuristicAgent() },                                       // NEW: routes by fingerprint
+        "minG0.05+v11" to { v11Base().apply { minTargetGrowth = 0.05 } },                    // current best (control)
+        "minG0.07+v11" to { v11Base().apply { minTargetGrowth = 0.07 } },                    // alternate config from rule
+        "vanilla" to { HeuristicAgent() },
+        "GreedyHeuristic" to { GreedyHeuristicAgent() },
     )
 
     // Fixed opponent. Use a stochastic one (CarefulRandom) so different N games on the
