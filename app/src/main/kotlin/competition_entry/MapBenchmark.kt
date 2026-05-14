@@ -54,12 +54,15 @@ fun main() {
     }}
     // v18: per-map best-config analysis for meta-heuristic design.
     // 6 configs spanning the parameter space we've explored, no search agents (fast).
+    // v20: shipsFraction sweep — 0.5 was assumed all along, ships0.9 just got 96.7% vs Greedy
     val candidates: List<Pair<String, () -> PlanetWarsAgent>> = listOf(
-        "MetaHeuristic-v1" to { MetaHeuristicAgent() },                                       // NEW: routes by fingerprint
-        "minG0.05+v11" to { v11Base().apply { minTargetGrowth = 0.05 } },                    // current best (control)
-        "minG0.07+v11" to { v11Base().apply { minTargetGrowth = 0.07 } },                    // alternate config from rule
-        "vanilla" to { HeuristicAgent() },
-        "GreedyHeuristic" to { GreedyHeuristicAgent() },
+        "ships0.5" to { v11Base().apply { minTargetGrowth = 0.05 } },                         // current default
+        "ships0.6" to { v11Base().apply { minTargetGrowth = 0.05; shipsFraction = 0.6 } },
+        "ships0.7" to { v11Base().apply { minTargetGrowth = 0.05; shipsFraction = 0.7 } },
+        "ships0.8" to { v11Base().apply { minTargetGrowth = 0.05; shipsFraction = 0.8 } },
+        "ships0.9" to { v11Base().apply { minTargetGrowth = 0.05; shipsFraction = 0.9 } },
+        "ships0.95" to { v11Base().apply { minTargetGrowth = 0.05; shipsFraction = 0.95 } },
+        "ships1.0" to { v11Base().apply { minTargetGrowth = 0.05; shipsFraction = 1.0 } },
     )
 
     // Fixed opponent. Use a stochastic one (CarefulRandom) so different N games on the
